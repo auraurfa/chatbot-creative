@@ -1,0 +1,9 @@
+# Jangan upload file environment
+.env
+
+# Jangan upload file autentikasi WhatsApp
+wwebjs_auth
+.wwebjs_cache
+
+# Jangan upload dependencies
+node_modules
