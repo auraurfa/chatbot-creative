@@ -1,30 +1,265 @@
-// ======= DEPENDENCIES =======
 require('dotenv').config();
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const express = require('express');
+const qrcode = require('qrcode');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { MongoStore } = require('wwebjs-mongo');
+const mongoose = require('mongoose');
 const { Client: NotionClient } = require('@notionhq/client');
 const axios = require('axios');
 
 // ======== CONFIGURATION ========
-const NOTION_API_KEY = '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';
-const DATABASE_ID = '1d9364bdbba880d39157cad14e4b939c';
-const PARENT_PAGE_ID = '1d9364bdbba880d18bb0c8b037c1e718';
-const OLLAMA_MODEL = 'gemma:2b';
+const NOTION_API_KEY = process.env.NOTION_API_KEY;
+const DATABASE_ID = process.env.DATABASE_ID;
+const PARENT_PAGE_ID = process.env.PARENT_PAGE_ID;
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL;
+const MONGODB_URI = process.env.MONGODB_URI;
 
+// Initialize Notion Client
 const notion = new NotionClient({ auth: NOTION_API_KEY });
 
-const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: './wwebjs_auth',
-    clientId: "client-1"
-  }),
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    timeout: 60000
-  },
-  qrTimeoutMs: 60000
-});
+// ======== MONGODB CONNECTION & WHATSAPP CLIENT ========
+let latestQR = null;
+let client;
 
+// ======== FUNGSI UTAMA ========
+async function initializeApp() {
+  try {
+    // 1. Connect to MongoDB
+    console.log('Connecting to MongoDB...');
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000,
+      ssl: true,
+      retryWrites: true,
+      retryReads: true
+    });
+
+    // Event handlers untuk koneksi MongoDB
+    mongoose.connection.on('connected', () => {
+      console.log('✅ Connected to MongoDB');
+    });
+
+    mongoose.connection.on('error', (err) => {
+      console.error('❌ MongoDB connection error:', err);
+      mongoose.disconnect();
+    });
+
+    // Tunggu sampai koneksi benar-benar terbuka
+    await new Promise((resolve, reject) => {
+      mongoose.connection.once('open', () => resolve());
+      mongoose.connection.on('error', (err) => reject(err));
+    });
+
+    // Buat koleksi jika belum ada
+    try {
+      await mongoose.connection.createCollection('wa_sessions');
+      console.log('✅ wa_sessions collection created or already exists');
+    } catch (err) {
+      console.error('❌ Error creating wa_sessions collection:', err);
+    }
+
+    // 2. Initialize WhatsApp Client
+    console.log('Initializing WhatsApp client...');
+    client = new Client({
+      authStrategy: new RemoteAuth({
+        store: new MongoStore({
+          mongoose: mongoose,
+          collectionName: 'wa_sessions'
+        }),
+        backupSyncIntervalMs: 60000,
+        clientId: "client-1",
+        restartOnAuthFail: true,  
+        killClientOnLogout: true   
+      }),
+      puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        timeout: 60000
+      }
+    });
+
+    // WhatsApp client event handlers
+    client.on('qr', async (qr) => {
+      console.log('QR RECEIVED');
+      latestQR = await qrcode.toDataURL(qr);
+    });
+
+    client.on('ready', () => {
+      console.log('🤖 Bot ready!');
+    });
+
+    client.on('remote_session_saved', () => {
+      console.log('✅ Session saved to MongoDB');
+    });
+
+    client.on('auth_failure', (msg) => {
+      console.error('❌ Auth failure:', msg);
+    });
+
+    client.on('disconnected', (reason) => {
+      console.log('❌ Client disconnected:', reason);
+    });
+
+    client.on('message', async (message) => {
+      try {
+        let content = message.body;
+    
+        // Handle group mentions
+        if (message.from.endsWith('@g.us')) {
+          const botNumber = `${client.info.wid.user}@c.us`;
+          if (!message.mentionedIds?.includes(botNumber)) return;
+          content = content.replace(/@\d+/g, '').trim();
+        }
+    
+        // Command routing
+        if (/^prompt add request/i.test(content)){
+          const promptText = `📝 *Creative Request Form* 🎨
+    (copy reply ini untuk kirim request)
+    
+    Judul: 
+    Deadline (YYYY-MM-DD): 
+    Requester (nama di Notion):
+    Weekly (Week 1-5): 
+    Priority (Low/Medium/High):
+    Description: 
+    
+    *Notes Penulisan*
+    (tambahkan tag @mention bot pada baris pertama)`;
+          await message.reply(promptText);
+        }
+        else if (/^prompt update to In Progress/i.test(content)) {
+          const promptText = `🛠️ *Update Request to In Progress* 🧑🏻‍💻
+    _(silakan salin reply ini untuk update request to In Progress)_
+    
+    *Detail Request* 
+    Judul : 
+    PIC Creative :
+          
+    *Notes penulisan*  
+    - Pastikan judul request ada dan sesuai pada list all request
+    - Nama PIC Creative sesuaikan dengan nama pengguna di notion`;
+          await message.reply(promptText);
+        }
+        else if (/^prompt update to Waiting Check/i.test(content)) {
+          const promptText = `🛠️ *Update Request to Waiting Check* ⏳
+    _(silakan salin reply ini untuk update request to Waiting Check)_
+    
+    *Detail Request* 
+    Judul : 
+    Evidence :
+          
+    *Notes penulisan*  
+    - Pastikan judul request ada dan sesuai pada list all request
+    - Evidence harus berupa URL yang valid`;
+          await message.reply(promptText);
+        }
+        else if (/^prompt update to Done/i.test(content)) {
+          const promptText = `🛠️ *Update Request to Done* ✅
+    _(silakan salin reply ini untuk update request to Done)_
+    
+    *Detail Request* 
+    Judul : 
+          
+    *Notes penulisan*  
+    - Pastikan judul request ada dan sesuai pada list all request`;
+          await message.reply(promptText);
+        }
+        else if (content.includes('*Edit Request to Creative*')) {
+          await handleUpdateTask(content, message);
+        }  
+        else if (content.includes('Judul:') && content.includes('Weekly (Week 1-5):')) {
+          await handleAddTask(content, message);
+        }  
+        else if (content.startsWith('generate brief /')) {
+          await handleGenerateBrief(content, message);
+        }
+        else if (content.startsWith('regenerate brief /')) {
+          await handleRegenerateBrief(content, message);
+        }
+        else if (content.startsWith('edit request /')) {
+          await handleEditTask(content, message);
+        }
+        else if (content.includes('Judul :') && content.includes('PIC Creative :')) {
+          await handleUpdateToInProgress(content, message);
+        }
+        else if (content.includes('Judul :') && content.includes('Evidence :')) {
+          await handleUpdateToWaitingCheck(content, message);
+        }
+        else if (content.includes('Judul :') && !content.includes('Evidence :') && !content.includes('PIC Creative :')) {
+          await handleUpdateToDone(content, message);
+        }
+        else if (/^update to In Progress\s*\//i.test(content)) {
+          await handleUpdateToInProgress(content, message);
+        }
+        else if (/^update to Waiting Check\s*\//i.test(content)) {
+          await handleUpdateToWaitingCheck(content, message);
+        }
+        else if (/^update to Done\s*\//i.test(content)) {
+          await handleUpdateToDone(content, message);
+        }
+        else if (/^list by priority\s*\//i.test(content)) {
+          await handleListTasksByPriority(content, message);
+        }
+        else if (/^list by deadline\s*\//i.test(content)) {
+          await handleListTasksByDeadline(content, message);
+        }
+        else if (/^list by PIC Creative\s*\//i.test(content)) {
+          await handleListTasksByPIC(content, message);
+        }
+        else if (/^list by Status WO\s*\//i.test(content)) {
+          await handleListTasksByStatus(content, message);
+        }
+        else if (/^list by status requester\s*\//i.test(content)) {
+          await handleListTasksByStatusReq(content, message);
+        }
+        else if (/^list all\s*\//i.test(content)) {
+          await handleListAllTasks(content, message);
+        }
+        else if (/^see detail\s*\//i.test(content)) {
+          await handleTaskDetail(content, message);
+        }
+        else if (content === 'help') {
+          const helpText = `
+    🤖 *BOT CREATIVE by GOODEVA* 💫
+        
+    📌 *Request Management Commands:*
+    - prompt add request 
+    - prompt update to In Progress 
+    - prompt update to Waiting Check 
+    - prompt update to Done 
+        
+    📌 *Request Listing Commands:*
+    - list by priority / [Low|Medium|High] / [Week 1-5]
+    - list by deadline / [Week 1-5]
+    - list by PIC Creative / [nama] 
+    - list by Status WO / [Open|In Progress|Waiting Check|Done] / [Week 1-5]
+    - list all / [Week 1-5]
+    - see detail / [judul] 
+        
+    📌 *Quick Commands:*
+    - update to In Progress / [judul] / [PIC]
+    - update to Waiting Check / [judul] / [evidence URL]
+    - update to Done / [judul]
+    - generate brief / [Judul]
+    - regenerate brief / [Judul]
+    - edit request / [Judul]
+    `;
+          await message.reply(helpText);
+        }
+      } catch (err) {
+        console.error('Error:', err);
+        await message.reply('❌ Terjadi kesalahan saat memproses perintah');
+      }
+    });
+
+    // 3. Start Client
+    await client.initialize();
+
+  } catch (error) {
+    console.error('❌ Gagal inisialisasi:', error);
+    process.exit(1); // Keluar jika error fatal
+  }
+}
+initializeApp();
 // ======== HELPER FUNCTIONS ========
 let NOTION_USERS_CACHE = [];
 
@@ -78,7 +313,7 @@ async function generateBrief(title, description) {
     // Kirim pesan bahwa proses pembuatan brief sedang berlangsung
     console.log(`🔄 Brief untuk tugas "${title}" sedang dibuat... Harap tunggu sebentar.`);
     
-    const response = await axios.post('http://localhost:11434/api/generate', {
+    const response = await axios.post('http://localhost:11435/api/generate', {
       model: OLLAMA_MODEL,
       prompt: `Buatkan brief formal dan menarik untuk tugas berjudul "${title}" berdasarkan deskripsi berikut:\n"${description}". 
       Tulis brief seolah-olah kamu sedang memberikan arahan kerja kepada seorang desainer atau tim kreatif. Gunakan bahasa yang profesional namun tetap engaging. 
@@ -1434,195 +1669,24 @@ async function sendTaskDetail(message, task) {
 }
 
 // ======== WHATSAPP EVENT HANDLERS ========
-const express = require('express');
-const qrcode = require('qrcode');
 const app = express();
-let latestQR = '';
+const PORT = process.env.PORT || 3000;
 
-// Mendapatkan QR code dari WhatsApp
-client.on('qr', async qr => {
-  console.log('📷 QR code received! Visit /qr to scan.');
-  latestQR = qr;
-});
-
-// Endpoint untuk QR code
 app.get('/qr', async (req, res) => {
-  if (!latestQR) return res.send('No QR code yet.');
+  if (!latestQR) return res.send('No QR yet!');
   const qrImage = await qrcode.toDataURL(latestQR);
-  res.send(`
-    <html>
-      <body style="display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;">
-        <h2>Scan this QR code with WhatsApp</h2>
-        <img src="${qrImage}" />
-      </body>
-    </html>
-  `);
+  res.send(`<img src="${qrImage}" />`);
 });
 
-// Menjalankan server Express di port 3000
-app.listen(3000, () => {
-  console.log('🔗 Visit https://chatbot-creative-production-d44b.up.railway.app/qr to scan qr code');
+app.get('/ping', (req, res) => res.send('OK'));  // Untuk anti-sleep
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🔗 Scan QR: https://nama-app-anda.onrender.com/qr`);
 });
 
 
-client.on('ready', () => {
-  console.log('🤖 Bot ready!');
-  refreshUserCache();
-  setInterval(refreshUserCache, 3600000);
-});
-
-client.on('message', async (message) => {
-  try {
-    let content = message.body;
-
-    // Handle group mentions
-    if (message.from.endsWith('@g.us')) {
-      const botNumber = `${client.info.wid.user}@c.us`;
-      if (!message.mentionedIds?.includes(botNumber)) return;
-      content = content.replace(/@\d+/g, '').trim();
-    }
-
-    // Command routing
-    if (/^prompt add request/i.test(content)){
-      const promptText = `📝 *Creative Request Form* 🎨
-(copy reply ini untuk kirim request)
-
-Judul: 
-Deadline (YYYY-MM-DD): 
-Requester (nama di Notion):
-Weekly (Week 1-5): 
-Priority (Low/Medium/High):
-Description: 
-
-*Notes Penulisan*
-(tambahkan tag @mention bot pada baris pertama)`;
-      await message.reply(promptText);
-    }
-    else if (/^prompt update to In Progress/i.test(content)) {
-      const promptText = `🛠️ *Update Request to In Progress* 🧑🏻‍💻
-_(silakan salin reply ini untuk update request to In Progress)_
-
-*Detail Request* 
-Judul : 
-PIC Creative :
-      
-*Notes penulisan*  
-- Pastikan judul request ada dan sesuai pada list all request
-- Nama PIC Creative sesuaikan dengan nama pengguna di notion`;
-      await message.reply(promptText);
-    }
-    else if (/^prompt update to Waiting Check/i.test(content)) {
-      const promptText = `🛠️ *Update Request to Waiting Check* ⏳
-_(silakan salin reply ini untuk update request to Waiting Check)_
-
-*Detail Request* 
-Judul : 
-Evidence :
-      
-*Notes penulisan*  
-- Pastikan judul request ada dan sesuai pada list all request
-- Evidence harus berupa URL yang valid`;
-      await message.reply(promptText);
-    }
-    else if (/^prompt update to Done/i.test(content)) {
-      const promptText = `🛠️ *Update Request to Done* ✅
-_(silakan salin reply ini untuk update request to Done)_
-
-*Detail Request* 
-Judul : 
-      
-*Notes penulisan*  
-- Pastikan judul request ada dan sesuai pada list all request`;
-      await message.reply(promptText);
-    }
-    else if (content.includes('*Edit Request to Creative*')) {
-      await handleUpdateTask(content, message);
-    }  
-    else if (content.includes('Judul:') && content.includes('Weekly (Week 1-5):')) {
-      await handleAddTask(content, message);
-    }  
-    else if (content.startsWith('generate brief /')) {
-      await handleGenerateBrief(content, message);
-    }
-    else if (content.startsWith('regenerate brief /')) {
-      await handleRegenerateBrief(content, message);
-    }
-    else if (content.startsWith('edit request /')) {
-      await handleEditTask(content, message);
-    }
-    else if (content.includes('Judul :') && content.includes('PIC Creative :')) {
-      await handleUpdateToInProgress(content, message);
-    }
-    else if (content.includes('Judul :') && content.includes('Evidence :')) {
-      await handleUpdateToWaitingCheck(content, message);
-    }
-    else if (content.includes('Judul :') && !content.includes('Evidence :') && !content.includes('PIC Creative :')) {
-      await handleUpdateToDone(content, message);
-    }
-    else if (/^update to In Progress\s*\//i.test(content)) {
-      await handleUpdateToInProgress(content, message);
-    }
-    else if (/^update to Waiting Check\s*\//i.test(content)) {
-      await handleUpdateToWaitingCheck(content, message);
-    }
-    else if (/^update to Done\s*\//i.test(content)) {
-      await handleUpdateToDone(content, message);
-    }
-    else if (/^list by priority\s*\//i.test(content)) {
-      await handleListTasksByPriority(content, message);
-    }
-    else if (/^list by deadline\s*\//i.test(content)) {
-      await handleListTasksByDeadline(content, message);
-    }
-    else if (/^list by PIC Creative\s*\//i.test(content)) {
-      await handleListTasksByPIC(content, message);
-    }
-    else if (/^list by Status WO\s*\//i.test(content)) {
-      await handleListTasksByStatus(content, message);
-    }
-    else if (/^list by status requester\s*\//i.test(content)) {
-      await handleListTasksByStatusReq(content, message);
-    }
-    else if (/^list all\s*\//i.test(content)) {
-      await handleListAllTasks(content, message);
-    }
-    else if (/^see detail\s*\//i.test(content)) {
-      await handleTaskDetail(content, message);
-    }
-    else if (content === 'help') {
-      const helpText = `
-🤖 *BOT CREATIVE by GOODEVA* 💫
-    
-📌 *Request Management Commands:*
-- prompt add request 
-- prompt update to In Progress 
-- prompt update to Waiting Check 
-- prompt update to Done 
-    
-📌 *Request Listing Commands:*
-- list by priority / [Low|Medium|High] / [Week 1-5]
-- list by deadline / [Week 1-5]
-- list by PIC Creative / [nama] 
-- list by Status WO / [Open|In Progress|Waiting Check|Done] / [Week 1-5]
-- list all / [Week 1-5]
-- see detail / [judul] 
-    
-📌 *Quick Commands:*
-- update to In Progress / [judul] / [PIC]
-- updateto Waiting Check / [judul] / [evidence URL]
-- update to Done / [judul]
-- generate brief / [Judul]
-- regenerate brief / [Judul]
-- edit request / [Judul]
-`;
-      await message.reply(helpText);
-    }
-  } catch (err) {
-    console.error('Error:', err);
-    await message.reply('❌ Terjadi kesalahan saat memproses perintah');
-  }
-});
 
 // ======== START BOT ========
 console.log('⏳ Starting bot...');
-client.initialize();
+initializeApp();
