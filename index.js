@@ -1,21 +1,13 @@
-const express = require('express');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-require('dotenv').config();
-
 // ======= DEPENDENCIES =======
+require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const { Client: NotionClient } = require('@notionhq/client');
 const axios = require('axios');
 
 // ======== CONFIGURATION ========
-
-const NOTION_API_KEY = process.env.NOTION_API_KEY;
-const DATABASE_ID = process.env.DATABASE_ID;
-const PARENT_PAGE_ID = process.env.PARENT_PAGE_ID;
-
+const NOTION_API_KEY = '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';
+const DATABASE_ID = '1d9364bdbba880d39157cad14e4b939c';
+const PARENT_PAGE_ID = '1d9364bdbba880d18bb0c8b037c1e718';
 const OLLAMA_MODEL = 'gemma:2b';
 
 const notion = new NotionClient({ auth: NOTION_API_KEY });
@@ -1442,10 +1434,36 @@ async function sendTaskDetail(message, task) {
 }
 
 // ======== WHATSAPP EVENT HANDLERS ========
-client.on('qr', qr => {
-  console.log('📷 Scan QR code:');
-  qrcode.generate(qr, { small: true });
+const express = require('express');
+const qrcode = require('qrcode');
+const app = express();
+let latestQR = '';
+
+// Mendapatkan QR code dari WhatsApp
+client.on('qr', async qr => {
+  console.log('📷 QR code received! Visit /qr to scan.');
+  latestQR = qr;
 });
+
+// Endpoint untuk QR code
+app.get('/qr', async (req, res) => {
+  if (!latestQR) return res.send('No QR code yet.');
+  const qrImage = await qrcode.toDataURL(latestQR);
+  res.send(`
+    <html>
+      <body style="display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;">
+        <h2>Scan this QR code with WhatsApp</h2>
+        <img src="${qrImage}" />
+      </body>
+    </html>
+  `);
+});
+
+// Menjalankan server Express di port 3000
+app.listen(3000, () => {
+  console.log('🔗 Visit https://<http://chatbot-creative-production-d44b.up.railway.app/>.railway.app/qr to scan the QR code');
+});
+
 
 client.on('ready', () => {
   console.log('🤖 Bot ready!');
@@ -1608,12 +1626,3 @@ Judul :
 // ======== START BOT ========
 console.log('⏳ Starting bot...');
 client.initialize();
-
-// Contoh route
-app.get('/', (req, res) => {
-  res.send('Chat bot Whatsapp to Notion by Creative Goodeva is Running!');
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
