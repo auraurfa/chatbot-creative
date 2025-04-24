@@ -17,6 +17,22 @@ const MONGODB_URI = process.env.MONGODB_URI;
 // Initialize Notion Client
 const notion = new NotionClient({ auth: NOTION_API_KEY });
 
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'OK',
+    whatsapp: client?.info ? 'Connected' : 'Disconnected'
+  });
+});
+
+app.get('/secret-ping', (req, res) => {
+  if (req.query.key === process.env.SECRET_KEY) {
+    console.log('🕵️‍♂️ Ping rahasia terdeteksi');
+    res.status(200).send('OK');
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
 // ======== MONGODB CONNECTION & WHATSAPP CLIENT ========
 let latestQR = null;
 let client;
@@ -89,6 +105,17 @@ async function initializeApp() {
 
     client.on('remote_session_saved', () => {
       console.log('✅ Session saved to MongoDB');
+    });
+
+    client.on('disconnected', () => {
+      console.log('⚠️ Bot disconnected! Reconnecting...');
+      setTimeout(() => initializeWhatsApp(), 5000);
+    });
+
+    process.on('SIGINT', async () => {
+      await client.destroy();
+      await mongoose.disconnect();
+      process.exit(0);
     });
 
     client.on('auth_failure', (msg) => {
